@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Model weights and checkpoints (large binary files — do not commit)
+outputs/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.gguf
+
+# HuggingFace cache
+~/.cache/huggingface/
+
+# Processed dataset cache
+data/processed/
+
+# Training logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

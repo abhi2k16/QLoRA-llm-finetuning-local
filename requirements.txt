@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  requirements.txt — Local LLM Fine-Tuning
+#  Target: Windows 11, Python 3.11 (win_llm conda env), CUDA 12.1
+#
+#  Install order matters. Run these commands in sequence:
+#
+#  1. Create and activate the conda environment:
+#       conda create -n win_llm python=3.11 -y
+#       conda activate win_llm
+#
+#  2. Install PyTorch with CUDA 12.1 support first:
+#       pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+#  3. Install Unsloth (Windows-specific build from GitHub):
+#       pip install "unsloth[windows] @ git+https://github.com/unslothai/unsloth.git"
+#
+#  4. Install the remaining dependencies:
+#       pip install -r requirements.txt
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# HuggingFace ecosystem
+transformers>=4.40.0
+datasets>=2.18.0
+accelerate>=0.28.0
+peft>=0.10.0
+
+# Training helpers
+trl>=0.8.0
+
+# 4-bit quantization — Windows build must be installed from source:
+# pip install bitsandbytes --prefer-binary --extra-index-url=https://jllllll.github.io/bitsandbytes-windows-webui
+bitsandbytes>=0.43.0
+
+# Config parsing
+pyyaml>=6.0
+
+# Optional: experiment tracking (uncomment to enable)
+# wandb
+# tensorboard
+
+# ─── Note on PyTorch ─────────────────────────────────────────────────────────
+# Do NOT include torch here — it must be installed with the CUDA-specific index
+# URL (step 2 above) or you will get a CPU-only build that cannot use your GPU.
+# ─────────────────────────────────────────────────────────────────────────────

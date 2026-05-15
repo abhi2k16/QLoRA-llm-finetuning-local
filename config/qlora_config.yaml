@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────
+#  QLoRA Fine-Tuning Config
+#  Target hardware: 3 GB VRAM GPU (e.g. GTX 1050), Windows 11
+#  Framework: Unsloth + HuggingFace transformers + trl
+# ─────────────────────────────────────────────────────────
+
+model:
+  # Primary choice: smallest footprint, fits in ~1.8 GB VRAM after 4-bit quant
+  base_model_name: "unsloth/SmolLM2-135M-Instruct"
+  # Alternative (richer reasoning, ~2.4 GB VRAM):
+  # base_model_name: "unsloth/Qwen2.5-0.5B-Instruct"
+
+  # Attention memory scales quadratically with this value.
+  # 512 is safe for 3 GB. Raise to 1024 only if your data requires it
+  # and you confirm no OOM errors first.
+  max_seq_length: 512
+
+lora:
+  # Low-rank dimension. 16 is a good default — higher = more capacity but
+  # more VRAM. Do not exceed 32 on this hardware.
+  r: 16
+
+  # Scaling factor. Keeping alpha == r is standard practice.
+  alpha: 16
+
+  # Unsloth optimises best with dropout=0. Change only if you see severe
+  # overfitting on a small dataset.
+  dropout: 0
+
+  # Target every linear projection layer for maximum adapter coverage.
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+training:
+  learning_rate: 0.0002        # 2e-4 is the recommended Unsloth starting point
+
+  # One sample per forward pass — the only safe value for 3 GB VRAM.
+  per_device_train_batch_size: 1
+
+  # Simulates effective batch size of 4 without storing 4 samples in VRAM.
+  gradient_accumulation_steps: 4
+
+  # Warmup steps before the learning rate scheduler kicks in.
+  warmup_steps: 5
+
+  # Low step count for a fast sanity-check run (~2–5 min on this hardware).
+  # Increase to 300–500 for a real training run.
+  max_steps: 60
+
+  # GTX 1050 (Pascal architecture) supports FP16 but NOT BF16.
+  # These two flags must always be opposite values.
+  fp16: true
+  bf16: false
+
+  # Keeps optimizer state in CPU RAM and pages it in only when needed.
+  # Prevents VRAM overflow when the model + gradients + activations are
+  # already close to the 3 GB ceiling.
+  optim: "paged_adamw_8bit"
+
+  # Log training loss every step so you can spot divergence early.
+  logging_steps: 1
+
+  # Where completed adapter weights are written.
+  output_dir: "outputs"
+
+  # Set to "wandb" or "tensorboard" if you want experiment tracking.
+  report_to: "none"
