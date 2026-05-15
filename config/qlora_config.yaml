@@ -71,3 +71,13 @@ training:
 
   # Set to "wandb" or "tensorboard" if you want experiment tracking.
   report_to: "none"
+
+  # Eval batches should stay small on low-VRAM GPUs.
+  per_device_eval_batch_size: 1
+
+evaluation:
+  # Hold out a small slice for evaluation. Set to 0.0 to disable evaluation.
+  eval_ratio: 0.25
+
+  # Run evaluation every N training steps when eval_ratio > 0.
+  eval_steps: 10
