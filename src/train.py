@@ -42,9 +42,9 @@ SEED        = 42
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(f"Config not found at '{CONFIG_PATH}'.")
-    with open(CONFIG_PATH, "r") as f:
-        cfg = yaml.safe_load(f)
-    logger.info("Config loaded from %s", CONFIG_PATH)
+    with open(CONFIG_PATH, "r") as f: # Use safe_load to avoid potential security issues with untrusted YAML files
+        cfg = yaml.safe_load(f)       # Load the YAML file into a Python dictionary 
+    logger.info("Config loaded from %s", CONFIG_PATH) # Log the successful loading of the configuration file, including the path from which it was loaded
     return cfg
 
 
@@ -63,21 +63,37 @@ def check_gpu() -> None:
 
 
 def load_tokenizer(model_name: str):
+    """
+    Load the tokenizer and ensure it has a pad token. If not, set the pad token to be the same as 
+    the tokenizer'sthe end-of-sequence token. This is important for proper padding during training, 
+    and particularly when dealing with variable-length sequences in a batch. This ensures that the 
+    tokenizer can handle variable-length sequences especially when using causal language models that 
+    may not have a dedicated pad token.
+    """
     from transformers import AutoTokenizer
     logger.info("Loading tokenizer: %s", model_name)
     tok = AutoTokenizer.from_pretrained(model_name)
     if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+        tok.pad_token = tok.eos_token 
         logger.info("pad_token set to eos_token")
     return tok
 
 
 def load_model_4bit(model_name: str):
+    """
+    Load the model in 4-bit precision using bitsandbytes. This significantly reduces VRAM usage, 
+    allowing us to fine-tune larger models on limited hardware. The BitsAndBytesConfig is set to 
+    use NormalFloat4 quantization, which provides better quality than other 4-bit quantization types. 
+    The compute dtype is set to float16, which is compatible with most GPUs and helps maintain 
+    performance while reducing memory usage. Additionally, double quantization is enabled for extra 
+    memory savings. The model is loaded with device_map="auto" to automatically place layers on the 
+    appropriate devices (e.g., GPU), and use_cache is set to False to allow for gradient checkpointing 
+    during training."""
     from transformers import AutoModelForCausalLM, BitsAndBytesConfig
     logger.info("Loading model in 4-bit: %s", model_name)
     bnb_cfg = BitsAndBytesConfig(
         load_in_4bit              = True,
-        bnb_4bit_quant_type       = "nf4",         # NormalFloat4 — best quality
+        bnb_4bit_quant_type       = "nf4",          # NormalFloat4 — best quality
         bnb_4bit_compute_dtype    = torch.float16,  # FP16 compute (GTX 1050 safe)
         bnb_4bit_use_double_quant = True,           # Extra 0.4 bpw saving
     )
@@ -93,6 +109,27 @@ def load_model_4bit(model_name: str):
 
 
 def attach_lora(model, lora_cfg: dict):
+    """
+    Attach LoRA adapters to the model. This allows for efficient fine-tuning by only training
+    a small number of additional parameters, while keeping the base model frozen. The LoRA
+    configuration is defined by the lora_cfg dictionary, which specifies the rank (r), scaling 
+    factor (alpha), dropout, and target modules for the adapters. After attaching the adapters, 
+    which modules to attach to, and what hyperparameters to use for the adapters. The function then
+    uses get_peft_model to apply the LoRA configuration to the model. Finally, the function calculates
+    and logs the number of trainable parameters in the model. This is useful for understanding how
+    many parameters are being trained during the fine-tuning process, and whether the LoRA adapters
+    are configured correctly. The function returns the model with the LoRA adapters attached. After
+    attaching the adapters, the function calculates the number of trainable parameters in the model
+    and logs this information. This is useful for understanding the efficiency of the fine-tuning
+    process, as we only want to train a small number of additional parameters (the LoRA adapters)
+    rather than the entire model. The function also logs the total number of parameters in the model
+    for comparison. 
+    The function inputs are: 
+    - model: The base model to which to attach LoRA adapters
+    - lora_cfg: A dictionary containing the LoRA configuration parameters`
+    returns:
+    - The model with LoRA adapters attached, ready for fine-tuning.
+    """
     from peft import LoraConfig, get_peft_model, TaskType
     logger.info(
         "Attaching LoRA: r=%d, alpha=%d, dropout=%s, modules=%s",
@@ -127,6 +164,7 @@ def collate_fn(batch, pad_token_id: int):
 
 
 def log_vram(label: str) -> None:
+    """Log current VRAM usage. Useful for debugging OOM issues."""
     if not torch.cuda.is_available():
         return
     alloc = torch.cuda.memory_allocated() / 1e9
@@ -137,7 +175,13 @@ def log_vram(label: str) -> None:
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 class InMemoryTextDataset(torch.utils.data.Dataset):
-    """Wraps pre-tokenised examples for the DataLoader."""
+    """Wraps pre-tokenised examples for the DataLoader to fetch. This is more efficient than tokenising on-the-fly.
+    The dataset takes a list of raw text strings and a tokenizer, and pre-tokenizes all the examples in memory during 
+    initialization. Each text string is tokenized using the provided tokenizer, with truncation and padding to a 
+    specified maximum length. The resulting token ID tensors are stored in a list for efficient retrieval during 
+    training. The __len__ method returns the number of examples in the dataset, while the __getitem__ method 
+    retrieves the pre-tokenized tensor for a given index. This approach allows for faster data loading during training, 
+    as the tokenization step is performed once upfront rather than on-the-fly for each batch."""
     def __init__(self, tokenizer, texts: list[str], max_length: int):
         self.examples = []
         for text in texts:
@@ -154,7 +198,16 @@ class InMemoryTextDataset(torch.utils.data.Dataset):
 
 
 def run_training(model, tokenizer, texts: list[str], cfg: dict, device: torch.device) -> float:
-    """Run the training loop. Returns the final average loss."""
+    """Run the training loop. Returns the final average loss.
+    function inputs are:
+    - model: The model to be fine-tuned, with LoRA adapters attached.
+    - tokenizer: The tokenizer corresponding to the base model, used for tokenizing the training texts.
+    - texts: A list of raw text strings that will be used for training. These will be tokenized and fed into the model during training.
+    - cfg: A configuration dictionary containing training hyperparameters such as max_steps, learning_rate, and gradient_accumulation_steps.
+    - device: The torch.device on which to perform training (e.g., "cuda" for GPU). 
+    returns:
+    - The final average loss after training is complete. 
+    """
     import bitsandbytes as bnb
 
     tcfg       = cfg["training"]
