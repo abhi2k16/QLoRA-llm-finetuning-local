@@ -1,256 +1,315 @@
 """
-train.py - Main QLoRA fine-tuning pipeline.
+train.py — QLoRA fine-tuning pipeline.
 
-Reads configuration from config/qlora_config.yaml, loads the model with
-4-bit quantization, attaches LoRA adapters, tokenizes the dataset, and runs
-training through Unsloth + HuggingFace trl.
+Stack: HuggingFace transformers + PEFT + bitsandbytes (no Unsloth).
 
 Run from the project root:
     python src/train.py
+
+Ensure the win_llm conda environment is active before running.
 """
 
-import logging # For logging training progress and metrics
+import logging
 import sys
 from pathlib import Path
 
 import torch
 import yaml
-from transformers import TrainingArguments # For configuring the training loop
-from trl import SFTTrainer                 # HuggingFace Trainer wrapper for supervised fine-tuning
+from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent))
-from dataset import LocalDatasetWrapper    # Custom dataset wrapper for loading and tokenizing local datasets
-from runtime_checks import get_fast_language_model
+from dataset import ShareGPTDataset
 
-
-OUTPUTS_DIR = Path("outputs")              
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)  
-#-----------------------------------------------------------------------------------------------------------------------#
-# Set up logging to both console and file with timestamps and log levels for better traceability of training progress   #
-# and debugging. Logs will be saved to outputs/train.log.                                                               #
-#-----------------------------------------------------------------------------------------------------------------------#
+# ── Logging ───────────────────────────────────────────────────────────────────
+Path("outputs").mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(OUTPUTS_DIR / "train.log", mode="w"),
+        logging.FileHandler("outputs/train.log", mode="w"),
     ],
 )
 logger = logging.getLogger(__name__)
 
-
 CONFIG_PATH = Path("config/qlora_config.yaml")
-DATA_PATH = Path("data/raw/dataset.json")
-SEED = 3407
+DATA_PATH   = Path("data/raw/dataset.json")
+SEED        = 42
 
 
-def load_config(path: Path) -> dict:
-    """
-    Load training configuration from a YAML file. The config should specify model parameters, 
-    LoRA settings, training hyperparameters, and evaluation settings. If the config file is missing, 
-    a FileNotFoundError is raised with instructions to create the config file before running.
-    """
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Config file not found at '{path}'. "
-            "Create config/qlora_config.yaml before running."
-        )
-    with open(path, "r", encoding="utf-8") as f:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"Config not found at '{CONFIG_PATH}'.")
+    with open(CONFIG_PATH, "r") as f:
         cfg = yaml.safe_load(f)
-    logger.info("Config loaded from %s", path)
+    logger.info("Config loaded from %s", CONFIG_PATH)
     return cfg
 
 
 def check_gpu() -> None:
     if not torch.cuda.is_available():
-        logger.warning(
-            "CUDA is not available. Training will run on CPU and be extremely slow. "
-            "Ensure your NVIDIA driver, CUDA stack, and GPU-enabled PyTorch install are correct."
+        raise RuntimeError(
+            "CUDA is not available. "
+            "Re-install PyTorch with: "
+            "pip install torch --index-url https://download.pytorch.org/whl/cu121"
         )
-        return
-
-    device = torch.cuda.get_device_name(0)
-    total_vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-    logger.info("GPU detected: %s | Total VRAM: %.2f GB", device, total_vram)
-
-    if total_vram < 3.0:
-        logger.warning(
-            "GPU has only %.2f GB VRAM. This config targets at least 3 GB and may OOM.",
-            total_vram,
-        )
+    name  = torch.cuda.get_device_name(0)
+    vram  = torch.cuda.get_device_properties(0).total_memory / 1e9
+    logger.info("GPU: %s | VRAM: %.2f GB", name, vram)
+    if vram < 3.0:
+        logger.warning("Less than 3 GB VRAM detected (%.2f GB). OOM is possible.", vram)
 
 
-def load_model(cfg: dict, fast_language_model):
-    model_name = cfg["model"]["base_model_name"]
-    max_seq_length = cfg["model"]["max_seq_length"]
-
-    logger.info("Loading base model: %s", model_name)
-    logger.info("Max sequence length: %s", max_seq_length)
-    logger.info("4-bit quantization: enabled")
-
-    model, tokenizer = fast_language_model.from_pretrained(
-        model_name=model_name,
-        max_seq_length=max_seq_length,
-        load_in_4bit=True,
-        dtype=None,
-    )
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+def load_tokenizer(model_name: str):
+    from transformers import AutoTokenizer
+    logger.info("Loading tokenizer: %s", model_name)
+    tok = AutoTokenizer.from_pretrained(model_name)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
         logger.info("pad_token set to eos_token")
-
-    logger.info("Base model loaded successfully")
-    return model, tokenizer
+    return tok
 
 
-def attach_lora(model, cfg: dict, fast_language_model):
-    lora_cfg = cfg["lora"]
+def load_model_4bit(model_name: str):
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+    logger.info("Loading model in 4-bit: %s", model_name)
+    bnb_cfg = BitsAndBytesConfig(
+        load_in_4bit              = True,
+        bnb_4bit_quant_type       = "nf4",         # NormalFloat4 — best quality
+        bnb_4bit_compute_dtype    = torch.float16,  # FP16 compute (GTX 1050 safe)
+        bnb_4bit_use_double_quant = True,           # Extra 0.4 bpw saving
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config = bnb_cfg,
+        device_map          = "auto",
+    )
+    model.config.use_cache = False       # Must be False for gradient checkpointing
+    model.enable_input_require_grads()   # Required for PEFT to attach adapters
+    logger.info("Model loaded successfully")
+    return model
 
+
+def attach_lora(model, lora_cfg: dict):
+    from peft import LoraConfig, get_peft_model, TaskType
     logger.info(
-        "Attaching LoRA adapters: r=%s, alpha=%s, dropout=%s",
-        lora_cfg["r"],
-        lora_cfg["alpha"],
-        lora_cfg["dropout"],
+        "Attaching LoRA: r=%d, alpha=%d, dropout=%s, modules=%s",
+        lora_cfg["r"], lora_cfg["alpha"], lora_cfg["dropout"],
+        lora_cfg["target_modules"],
     )
-    logger.info("Target modules: %s", lora_cfg["target_modules"])
-
-    model = fast_language_model.get_peft_model(
-        model,
-        r=lora_cfg["r"],
-        target_modules=lora_cfg["target_modules"],
-        lora_alpha=lora_cfg["alpha"],
-        lora_dropout=lora_cfg["dropout"],
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=SEED,
+    config = LoraConfig(
+        r              = lora_cfg["r"],
+        lora_alpha     = lora_cfg["alpha"],
+        target_modules = lora_cfg["target_modules"],
+        lora_dropout   = lora_cfg["dropout"],
+        bias           = "none",
+        task_type      = TaskType.CAUSAL_LM,
     )
-
+    model = get_peft_model(model, config)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
+    total     = sum(p.numel() for p in model.parameters())
     logger.info(
-        "Trainable parameters: %s / %s (%.2f%%)",
-        f"{trainable:,}",
-        f"{total:,}",
-        100 * trainable / total,
+        "Trainable parameters: %s / %s (%.3f%%)",
+        f"{trainable:,}", f"{total:,}", 100 * trainable / total,
     )
     return model
 
 
-def build_training_args(cfg: dict, has_eval: bool) -> TrainingArguments:
-    t = cfg["training"]
-    eval_cfg = cfg.get("evaluation", {})
-
-    Path(t["output_dir"]).mkdir(parents=True, exist_ok=True)
-
-    evaluation_strategy = "steps" if has_eval else "no"
-    eval_steps = eval_cfg.get("eval_steps", t["logging_steps"]) if has_eval else None
-
-    args = TrainingArguments(
-        per_device_train_batch_size=t["per_device_train_batch_size"],
-        per_device_eval_batch_size=t.get("per_device_eval_batch_size", 1),
-        gradient_accumulation_steps=t["gradient_accumulation_steps"],
-        warmup_steps=t["warmup_steps"],
-        max_steps=t["max_steps"],
-        learning_rate=float(t["learning_rate"]),
-        fp16=t["fp16"],
-        bf16=t["bf16"],
-        logging_steps=t["logging_steps"],
-        output_dir=t["output_dir"],
-        optim=t["optim"],
-        report_to=t.get("report_to", "none"),
-        save_strategy="steps",
-        save_steps=t["max_steps"],
-        save_total_limit=1,
-        evaluation_strategy=evaluation_strategy,
-        eval_steps=eval_steps,
-        seed=SEED,
-    )
-
-    logger.info(
-        "Training args: steps=%s, lr=%s, effective_batch=%s, optim=%s, eval=%s",
-        t["max_steps"],
-        t["learning_rate"],
-        t["per_device_train_batch_size"] * t["gradient_accumulation_steps"],
-        t["optim"],
-        evaluation_strategy,
-    )
-    return args
+def collate_fn(batch, pad_token_id: int):
+    """Right-pad a batch of token-ID tensors to equal length."""
+    max_len = max(x.size(0) for x in batch)
+    padded  = torch.full((len(batch), max_len), pad_token_id, dtype=torch.long)
+    for i, seq in enumerate(batch):
+        padded[i, : seq.size(0)] = seq
+    return padded
 
 
-def log_vram(label: str, peak: bool = False) -> None:
+def log_vram(label: str) -> None:
     if not torch.cuda.is_available():
         return
+    alloc = torch.cuda.memory_allocated() / 1e9
+    resv  = torch.cuda.memory_reserved()  / 1e9
+    logger.info("VRAM [%s] — allocated: %.2f GB  reserved: %.2f GB", label, alloc, resv)
 
-    if peak:
-        peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 3)
-        logger.info("Peak VRAM during %s: %.2f GB", label, peak_memory)
-        return
 
-    allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-    reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-    logger.info("VRAM %s - allocated: %.2f GB, reserved: %.2f GB", label, allocated, reserved)
+# ── Training loop ─────────────────────────────────────────────────────────────
 
+class InMemoryTextDataset(torch.utils.data.Dataset):
+    """Wraps pre-tokenised examples for the DataLoader."""
+    def __init__(self, tokenizer, texts: list[str], max_length: int):
+        self.examples = []
+        for text in texts:
+            enc = tokenizer(
+                text,
+                truncation    = True,
+                max_length    = max_length,
+                return_tensors= "pt",
+            )
+            self.examples.append(enc["input_ids"].squeeze(0))
+
+    def __len__(self):         return len(self.examples)
+    def __getitem__(self, i):  return self.examples[i]
+
+
+def run_training(model, tokenizer, texts: list[str], cfg: dict, device: torch.device) -> float:
+    """Run the training loop. Returns the final average loss."""
+    import bitsandbytes as bnb
+
+    tcfg       = cfg["training"]
+    max_len    = cfg["model"]["max_seq_length"]
+    max_steps  = tcfg["max_steps"]
+    grad_accum = tcfg["gradient_accumulation_steps"]
+    lr         = float(tcfg["learning_rate"])
+
+    # Dataset & loader
+    torch_ds = InMemoryTextDataset(tokenizer, texts, max_len)
+    loader   = DataLoader(
+        torch_ds,
+        batch_size  = 1,
+        shuffle     = True,
+        collate_fn  = lambda b: collate_fn(b, tokenizer.pad_token_id),
+    )
+
+    # Optimizer — paged 8-bit AdamW offloads state to CPU RAM
+    optimizer = bnb.optim.PagedAdamW8bit(
+        [p for p in model.parameters() if p.requires_grad],
+        lr = lr,
+    )
+
+    # LR warmup scheduler
+    from torch.optim.lr_scheduler import LinearLR
+    warmup_steps = tcfg.get("warmup_steps", 5)
+    scheduler = LinearLR(
+        optimizer,
+        start_factor = 0.1,
+        end_factor   = 1.0,
+        total_iters  = warmup_steps,
+    )
+
+    # FP16 gradient scaler
+    scaler = torch.cuda.amp.GradScaler()
+
+    model.train()
+    optimizer.zero_grad()
+
+    step       = 0
+    accum_loss = 0.0
+    last_loss  = 0.0
+
+    logger.info("Training started — %d steps, grad_accum=%d", max_steps, grad_accum)
+
+    while step < max_steps:
+        for batch in loader:
+            if step >= max_steps:
+                break
+
+            input_ids = batch.to(device)
+            labels    = input_ids.clone()
+            # Mask padding tokens so they don't contribute to the loss
+            labels[labels == tokenizer.pad_token_id] = -100
+
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                outputs = model(input_ids=input_ids, labels=labels)
+                loss    = outputs.loss / grad_accum
+
+            scaler.scale(loss).backward()
+            accum_loss += loss.item()
+
+            if (step + 1) % grad_accum == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                if step < warmup_steps:
+                    scheduler.step()
+
+                last_loss = accum_loss
+                logger.info(
+                    "step %d/%d | loss: %.4f | lr: %.2e",
+                    step + 1, max_steps, accum_loss,
+                    optimizer.param_groups[0]["lr"],
+                )
+                accum_loss = 0.0
+
+            step += 1
+
+    return last_loss
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     logger.info("=" * 60)
-    logger.info("  Local QLoRA Fine-Tuning Pipeline")
+    logger.info("  QLoRA Fine-Tuning  (HuggingFace + PEFT + bitsandbytes)")
     logger.info("=" * 60)
 
     check_gpu()
-    fast_language_model = get_fast_language_model("Training")
-    cfg = load_config(CONFIG_PATH)
-    model, tokenizer = load_model(cfg, fast_language_model)
-    model = attach_lora(model, cfg, fast_language_model)
+    device = torch.device("cuda")
+    cfg    = load_config()
 
+    tokenizer = load_tokenizer(cfg["model"]["base_model_name"])
+    model     = load_model_4bit(cfg["model"]["base_model_name"])
+    model     = attach_lora(model, cfg["lora"])
+
+    # Prepare dataset
     logger.info("Loading dataset from %s", DATA_PATH)
-    data_pipeline = LocalDatasetWrapper(
-        tokenizer=tokenizer,
-        max_seq_length=cfg["model"]["max_seq_length"],
+    ds_wrapper = ShareGPTDataset(
+        tokenizer      = tokenizer,
+        max_seq_length = cfg["model"]["max_seq_length"],
     )
 
-    eval_cfg = cfg.get("evaluation", {})
-    dataset_splits = data_pipeline.prepare_splits(
-        str(DATA_PATH),
-        eval_ratio=float(eval_cfg.get("eval_ratio", 0.0)),
-        seed=SEED,
-    )
-    train_dataset = dataset_splits["train"]
-    eval_dataset = dataset_splits["eval"] if "eval" in dataset_splits else None
-
-    training_args = build_training_args(cfg, has_eval=eval_dataset is not None)
-
-    trainer = SFTTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        dataset_text_field="text",
-        max_seq_length=cfg["model"]["max_seq_length"],
-        args=training_args,
-        packing=False,
-    )
+    eval_cfg   = cfg.get("evaluation", {})
+    eval_ratio = float(eval_cfg.get("eval_ratio", 0.0))
+    splits     = ds_wrapper.prepare_splits(str(DATA_PATH), eval_ratio=eval_ratio, seed=SEED)
+    train_texts = splits["train"]["text"]
 
     log_vram("before training")
 
-    logger.info("Starting training...")
-    train_result = trainer.train()
-    logger.info("Training complete. Final loss: %.4f", train_result.training_loss)
+    # Train
+    final_loss = run_training(model, tokenizer, train_texts, cfg, device)
+    logger.info("Training complete. Final loss: %.4f", final_loss)
 
-    if eval_dataset is not None:
-        logger.info("Running final evaluation on held-out split...")
-        metrics = trainer.evaluate()
-        logger.info("Evaluation metrics: %s", metrics)
+    # Optional evaluation
+    if "eval" in splits:
+        logger.info("Evaluating on held-out split (%d examples)...", splits["eval"].num_rows)
+        model.eval()
+        eval_losses = []
+        eval_texts  = splits["eval"]["text"]
+        eval_ds     = InMemoryTextDataset(tokenizer, eval_texts, cfg["model"]["max_seq_length"])
+        eval_loader = DataLoader(
+            eval_ds,
+            batch_size = 1,
+            collate_fn = lambda b: collate_fn(b, tokenizer.pad_token_id),
+        )
+        with torch.no_grad():
+            for batch in eval_loader:
+                input_ids = batch.to(device)
+                labels    = input_ids.clone()
+                labels[labels == tokenizer.pad_token_id] = -100
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    out = model(input_ids=input_ids, labels=labels)
+                eval_losses.append(out.loss.item())
+        avg_eval = sum(eval_losses) / len(eval_losses)
+        logger.info("Eval loss: %.4f", avg_eval)
 
-    log_vram("training", peak=True)
+    # Peak VRAM
+    peak = torch.cuda.max_memory_allocated() / 1e9
+    logger.info("Peak VRAM: %.2f GB", peak)
 
+    # Save adapter
     save_path = Path(cfg["training"]["output_dir"]) / "final_model"
-    logger.info("Saving LoRA adapter to %s ...", save_path)
-    model.save_pretrained_merged(str(save_path), tokenizer, save_method="lora")
+    save_path.mkdir(parents=True, exist_ok=True)
+    logger.info("Saving adapter to %s ...", save_path)
+    model.save_pretrained(str(save_path))
+    tokenizer.save_pretrained(str(save_path))
 
     logger.info("=" * 60)
-    logger.info("Done. Adapter saved to: %s", save_path)
-    logger.info("Load it for inference with: python src/inference.py --prompt \"Your prompt\"")
+    logger.info("  Done! Adapter saved to: %s", save_path)
+    logger.info("  Inference: python src/inference.py --prompt \"Your prompt\"")
+    logger.info("  Chat:      python src/chat.py")
     logger.info("=" * 60)
 
 

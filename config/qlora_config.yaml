@@ -1,33 +1,32 @@
 # ─────────────────────────────────────────────────────────
 #  QLoRA Fine-Tuning Config
-#  Target hardware: 3 GB VRAM GPU (e.g. GTX 1050), Windows 11
-#  Framework: Unsloth + HuggingFace transformers + trl
+#  Target: 3 GB VRAM GPU (GTX 1050), Windows 11, CUDA 12.1
+#  Stack:  HuggingFace transformers + PEFT + bitsandbytes
 # ─────────────────────────────────────────────────────────
 
 model:
-  # Primary choice: smallest footprint, fits in ~1.8 GB VRAM after 4-bit quant
+  # Primary choice — fits in ~1.8 GB VRAM after 4-bit quantization
   base_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
-  # Alternative (richer reasoning, ~2.4 GB VRAM):
-  # base_model_name: "unsloth/Qwen2.5-0.5B-Instruct"
 
-  # Attention memory scales quadratically with this value.
-  # 512 is safe for 3 GB. Raise to 1024 only if your data requires it
-  # and you confirm no OOM errors first.
-  max_seq_length: 128
+  # Alternative — richer reasoning, ~2.4 GB VRAM after quantization
+  # base_model_name: "Qwen/Qwen2.5-0.5B-Instruct"
+
+  # Attention memory scales quadratically with sequence length.
+  # 512 is safe for 3 GB. Reduce to 256 if you hit OOM errors.
+  max_seq_length: 512
 
 lora:
-  # Low-rank dimension. 16 is a good default — higher = more capacity but
-  # more VRAM. Do not exceed 32 on this hardware.
+  # Low-rank dimension. 8 is conservative and safe for 3 GB.
+  # Raise to 16 only after confirming no OOM at 8.
   r: 8
 
   # Scaling factor. Keeping alpha == r is standard practice.
-  alpha: 16
+  alpha: 8
 
-  # Unsloth optimises best with dropout=0. Change only if you see severe
-  # overfitting on a small dataset.
+  # 0 is optimal for stable training on small datasets.
   dropout: 0
 
-  # Target every linear projection layer for maximum adapter coverage.
+  # All major linear projection layers — maximum adapter coverage.
   target_modules:
     - q_proj
     - k_proj
@@ -38,46 +37,41 @@ lora:
     - down_proj
 
 training:
-  learning_rate: 0.0002        # 2e-4 is the recommended Unsloth starting point
+  learning_rate: 0.0002
 
-  # One sample per forward pass — the only safe value for 3 GB VRAM.
+  # One sample per forward pass — only safe value for 3 GB VRAM.
   per_device_train_batch_size: 1
 
   # Simulates effective batch size of 4 without storing 4 samples in VRAM.
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 4
 
-  # Warmup steps before the learning rate scheduler kicks in.
+  # Warmup steps before LR scheduler activates.
   warmup_steps: 5
 
-  # Low step count for a fast sanity-check run (~2–5 min on this hardware).
+  # 60 steps = fast smoke test (~2–5 min on GTX 1050).
   # Increase to 300–500 for a real training run.
   max_steps: 60
 
-  # GTX 1050 (Pascal architecture) supports FP16 but NOT BF16.
-  # These two flags must always be opposite values.
+  # GTX 1050 supports FP16 but NOT BF16. Keep these opposite.
   fp16: true
   bf16: false
 
-  # Keeps optimizer state in CPU RAM and pages it in only when needed.
-  # Prevents VRAM overflow when the model + gradients + activations are
-  # already close to the 3 GB ceiling.
+  # Keeps optimizer state in CPU RAM, paged into VRAM only when needed.
+  # Prevents VRAM overflow on 3 GB cards.
   optim: "paged_adamw_8bit"
 
-  # Log training loss every step so you can spot divergence early.
+  # Log loss every step to catch divergence early.
   logging_steps: 1
 
-  # Where completed adapter weights are written.
+  # Adapter weights are saved here after training.
   output_dir: "outputs"
 
-  # Set to "wandb" or "tensorboard" if you want experiment tracking.
+  # Set to "wandb" or "tensorboard" to enable experiment tracking.
   report_to: "none"
 
-  # Eval batches should stay small on low-VRAM GPUs.
-  per_device_eval_batch_size: 1
-
 evaluation:
-  # Hold out a small slice for evaluation. Set to 0.0 to disable evaluation.
-  eval_ratio: 0.25
+  # Fraction of data held out for validation. Set to 0.0 to disable.
+  eval_ratio: 0.0
 
-  # Run evaluation every N training steps when eval_ratio > 0.
+  # Run evaluation every N steps (only used when eval_ratio > 0).
   eval_steps: 10

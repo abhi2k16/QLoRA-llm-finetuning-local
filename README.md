@@ -1,86 +1,79 @@
 # QLoRA Local Fine-Tuning
 
-This project fine-tunes a small instruction model locally on Windows using Unsloth, HuggingFace, and QLoRA. It is designed for low-VRAM GPUs and keeps hyperparameters in `config/qlora_config.yaml`.
+Fine-tune a small instruction model locally on Windows 11 using HuggingFace,
+PEFT, and bitsandbytes. Designed for low-VRAM GPUs (3 GB). No Unsloth required.
 
-## Project Layout
+## Stack
 
-```text
-config/qlora_config.yaml   Training and evaluation settings
-data/raw/dataset.json      ShareGPT-format training data
-src/dataset.py             Dataset formatting, validation, and split logic
-src/train.py               Main fine-tuning entrypoint
-src/validate_dataset.py    Dataset validation and preview script
-src/inference.py           Inference script for a saved adapter
-outputs/                   Logs, checkpoints, and final adapter
-```
+| Library | Role |
+|---|---|
+| `transformers` | Model loading, tokenisation |
+| `peft` | LoRA adapter attachment |
+| `bitsandbytes` | 4-bit quantization + paged optimizer |
+| `torch` | Training loop, FP16 scaler |
 
-## Environment Setup
-
-Use Python 3.11 on Windows and install dependencies in this order:
+## Environment setup
 
 ```powershell
+# 1. Create conda environment
 conda create -n win_llm python=3.11 -y
 conda activate win_llm
+
+# 2. PyTorch with CUDA 12.1
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install "unsloth[windows] @ git+https://github.com/unslothai/unsloth.git"
+
+# 3. bitsandbytes Windows build
+pip install bitsandbytes --prefer-binary --extra-index-url https://jllllll.github.io/bitsandbytes-windows-webui
+
+# 4. Remaining dependencies
 pip install -r requirements.txt
 ```
 
-If `bitsandbytes` fails from `requirements.txt`, install the Windows build manually:
+## Dataset format
 
-```powershell
-pip install bitsandbytes --prefer-binary --extra-index-url=https://jllllll.github.io/bitsandbytes-windows-webui
-```
-
-## Dataset Format
-
-`data/raw/dataset.json` must be a JSON array in ShareGPT format:
+`data/raw/dataset.json` — ShareGPT JSON array:
 
 ```json
 [
   {
     "conversations": [
       {"from": "human", "value": "What is LoRA?"},
-      {"from": "gpt", "value": "LoRA is a parameter-efficient fine-tuning method."}
+      {"from": "gpt",   "value": "LoRA is a parameter-efficient fine-tuning method."}
     ]
   }
 ]
 ```
 
-## Validate the Dataset
-
-Run this before training to catch formatting and length issues:
+## Usage
 
 ```powershell
+# Validate dataset before training
 python src/validate_dataset.py
-```
 
-## Train
-
-The training script can now create a train/eval split and run periodic evaluation when enabled in the config.
-
-```powershell
+# Train
 python src/train.py
-```
 
-## Inference
-
-After training finishes, run inference against the saved adapter:
-
-```powershell
+# Inference with saved adapter
 python src/inference.py --prompt "Explain machine learning in simple terms."
+
+# Interactive chat
+python src/chat.py
+python src/chat.py --system-prompt "You are a concise ML tutor."
 ```
 
-## Evaluation Settings
+## Config
 
-`config/qlora_config.yaml` includes an `evaluation` section:
+All hyperparameters live in `config/qlora_config.yaml`. Key settings:
 
-- Set `eval_ratio` to `0.0` to disable evaluation.
-- Set it to something like `0.1` or `0.2` to hold out part of the dataset.
-- `eval_steps` controls how often evaluation runs during training.
+| Parameter | Default | Notes |
+|---|---|---|
+| `max_seq_length` | 512 | Reduce to 256 if OOM |
+| `max_steps` | 60 | Increase to 300–500 for real training |
+| `lora r` | 8 | Higher = more capacity, more VRAM |
+| `learning_rate` | 0.0002 | Safe default for LoRA |
 
 ## Notes
 
-- The sample dataset is only suitable for a smoke test.
-- For real training, replace it with a larger task-specific dataset.
-- This repo does not yet include automated tests for the ML pipeline.
+- Unsloth is not used — it segfaults on Pascal GPUs (GTX 1050, compute 6.1)
+- The sample dataset (4 examples) is for smoke-testing only
+- Replace it with your own domain data for real fine-tuning
