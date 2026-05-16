@@ -1,8 +1,7 @@
 """
 train_raw.py — Raw PyTorch training loop, no trl / SFTTrainer dependency.
 
-If train.py segfaults because of trl or transformers Trainer internals,
-this script trains the same model using a plain PyTorch optimizer loop.
+If you want the simplest non-Unsloth training path, use this script.
 
 Run from project root:
     python src/train_raw.py
@@ -18,6 +17,8 @@ import yaml
 from torch.utils.data import DataLoader, Dataset as TorchDataset
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+from runtime_checks import require_cuda_runtime
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 Path("outputs").mkdir(exist_ok=True)
@@ -95,7 +96,7 @@ def collate_fn(batch, pad_token_id: int):
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     logger.info("=" * 60)
-    logger.info("  Raw PyTorch QLoRA Training (no trl / SFTTrainer)")
+    logger.info("  Raw PyTorch QLoRA Training (HuggingFace + PEFT)")
     logger.info("=" * 60)
 
     cfg = load_config()
@@ -109,36 +110,47 @@ def main():
     grad_accum     = train_cfg["gradient_accumulation_steps"]
 
     # ── Step 1: GPU check ────────────────────────────────────────────────────
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA not available. Cannot train without a GPU.")
+    require_cuda_runtime("train_raw.py")
     device = torch.device("cuda")
     logger.info(f"GPU: {torch.cuda.get_device_name(0)} | "
                 f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
     # ── Step 2: Load model ───────────────────────────────────────────────────
-    logger.info("Loading model with 4-bit quantization...")
-    from unsloth import FastLanguageModel
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name     = model_cfg["base_model_name"],
-        max_seq_length = max_seq_length,
-        load_in_4bit   = True,
-        dtype          = None,
+    logger.info("Loading tokenizer and model with 4-bit quantization...")
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from peft import LoraConfig, TaskType, get_peft_model
+
+    tokenizer = AutoTokenizer.from_pretrained(model_cfg["base_model_name"])
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
     )
+    model = AutoModelForCausalLM.from_pretrained(
+        model_cfg["base_model_name"],
+        quantization_config=bnb_config,
+        device_map="auto",
+    )
+    model.config.use_cache = False
+    model.enable_input_require_grads()
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     logger.info("Model loaded OK")
 
     # ── Step 3: Attach LoRA ──────────────────────────────────────────────────
     logger.info("Attaching LoRA adapters...")
-    model = FastLanguageModel.get_peft_model(
+    lora_config = LoraConfig(
+        r=lora_cfg["r"],
+        target_modules=lora_cfg["target_modules"],
+        lora_alpha=lora_cfg["alpha"],
+        lora_dropout=lora_cfg["dropout"],
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+    )
+    model = get_peft_model(
         model,
-        r              = lora_cfg["r"],
-        target_modules = lora_cfg["target_modules"],
-        lora_alpha     = lora_cfg["alpha"],
-        lora_dropout   = lora_cfg["dropout"],
-        bias           = "none",
-        use_gradient_checkpointing = True,
-        random_state   = 3407,
+        lora_config,
     )
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Trainable parameters: {trainable:,}")
@@ -166,8 +178,6 @@ def main():
     # ── Step 6: Training loop ────────────────────────────────────────────────
     logger.info(f"Starting training: max_steps={max_steps}, grad_accum={grad_accum}")
     model.train()
-    model.to(device)
-
     step        = 0
     accum_loss  = 0.0
     optimizer.zero_grad()
@@ -201,8 +211,10 @@ def main():
 
     # ── Step 7: Save ─────────────────────────────────────────────────────────
     save_path = Path(train_cfg["output_dir"]) / "final_model"
+    save_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Saving LoRA adapter to {save_path}...")
-    model.save_pretrained_merged(str(save_path), tokenizer, save_method="lora")
+    model.save_pretrained(str(save_path))
+    tokenizer.save_pretrained(str(save_path))
 
     logger.info("=" * 60)
     logger.info(f"Done. Adapter saved to {save_path}")

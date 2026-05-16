@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+
 import torch
 
 
@@ -25,16 +27,11 @@ def require_cuda_runtime(context: str) -> None:
     )
 
 
-def get_fast_language_model(context: str):
-    require_cuda_runtime(context)
-
+def require_module(module_name: str, install_hint: str, context: str):
     try:
-        from unsloth import FastLanguageModel
+        return importlib.import_module(module_name)
     except Exception as exc:
         raise RuntimeError(
-            f"{context} could not import Unsloth after CUDA was detected. "
-            "Reinstall Unsloth in the same environment.\n"
-            '  python -m pip install "unsloth[windows] @ git+https://github.com/unslothai/unsloth.git"'
+            f"{context} requires the '{module_name}' package, but it could not be imported.\n"
+            f"Install it with:\n  {install_hint}"
         ) from exc
-
-    return FastLanguageModel

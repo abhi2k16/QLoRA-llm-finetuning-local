@@ -25,6 +25,7 @@ outputs/
 
 # HuggingFace cache
 ~/.cache/huggingface/
+unsloth_compiled_cache/
 
 # Processed dataset cache
 data/processed/
