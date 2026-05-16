@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 import yaml
-from unsloth import FastLanguageModel
+from runtime_checks import get_fast_language_model
 
 
 CONFIG_PATH = Path("config/qlora_config.yaml")
@@ -67,14 +67,15 @@ def generate_reply(model, tokenizer, messages: list[dict], max_new_tokens: int, 
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config))
+    fast_language_model = get_fast_language_model("Chat")
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    model, tokenizer = fast_language_model.from_pretrained(
         model_name=args.adapter_path,
         max_seq_length=cfg["model"]["max_seq_length"],
         load_in_4bit=True,
         dtype=None,
     )
-    FastLanguageModel.for_inference(model)
+    fast_language_model.for_inference(model)
 
     messages = build_messages(args.system_prompt)
 

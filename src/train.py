@@ -9,23 +9,26 @@ Run from the project root:
     python src/train.py
 """
 
-import logging
+import logging # For logging training progress and metrics
 import sys
 from pathlib import Path
 
 import torch
 import yaml
-from transformers import TrainingArguments
-from trl import SFTTrainer
-from unsloth import FastLanguageModel
+from transformers import TrainingArguments # For configuring the training loop
+from trl import SFTTrainer                 # HuggingFace Trainer wrapper for supervised fine-tuning
 
 sys.path.insert(0, str(Path(__file__).parent))
-from dataset import LocalDatasetWrapper
+from dataset import LocalDatasetWrapper    # Custom dataset wrapper for loading and tokenizing local datasets
+from runtime_checks import get_fast_language_model
 
 
-OUTPUTS_DIR = Path("outputs")
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-
+OUTPUTS_DIR = Path("outputs")              
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)  
+#-----------------------------------------------------------------------------------------------------------------------#
+# Set up logging to both console and file with timestamps and log levels for better traceability of training progress   #
+# and debugging. Logs will be saved to outputs/train.log.                                                               #
+#-----------------------------------------------------------------------------------------------------------------------#
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -43,6 +46,11 @@ SEED = 3407
 
 
 def load_config(path: Path) -> dict:
+    """
+    Load training configuration from a YAML file. The config should specify model parameters, 
+    LoRA settings, training hyperparameters, and evaluation settings. If the config file is missing, 
+    a FileNotFoundError is raised with instructions to create the config file before running.
+    """
     if not path.exists():
         raise FileNotFoundError(
             f"Config file not found at '{path}'. "
@@ -73,7 +81,7 @@ def check_gpu() -> None:
         )
 
 
-def load_model(cfg: dict):
+def load_model(cfg: dict, fast_language_model):
     model_name = cfg["model"]["base_model_name"]
     max_seq_length = cfg["model"]["max_seq_length"]
 
@@ -81,7 +89,7 @@ def load_model(cfg: dict):
     logger.info("Max sequence length: %s", max_seq_length)
     logger.info("4-bit quantization: enabled")
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    model, tokenizer = fast_language_model.from_pretrained(
         model_name=model_name,
         max_seq_length=max_seq_length,
         load_in_4bit=True,
@@ -96,7 +104,7 @@ def load_model(cfg: dict):
     return model, tokenizer
 
 
-def attach_lora(model, cfg: dict):
+def attach_lora(model, cfg: dict, fast_language_model):
     lora_cfg = cfg["lora"]
 
     logger.info(
@@ -107,7 +115,7 @@ def attach_lora(model, cfg: dict):
     )
     logger.info("Target modules: %s", lora_cfg["target_modules"])
 
-    model = FastLanguageModel.get_peft_model(
+    model = fast_language_model.get_peft_model(
         model,
         r=lora_cfg["r"],
         target_modules=lora_cfg["target_modules"],
@@ -190,9 +198,10 @@ def main() -> None:
     logger.info("=" * 60)
 
     check_gpu()
+    fast_language_model = get_fast_language_model("Training")
     cfg = load_config(CONFIG_PATH)
-    model, tokenizer = load_model(cfg)
-    model = attach_lora(model, cfg)
+    model, tokenizer = load_model(cfg, fast_language_model)
+    model = attach_lora(model, cfg, fast_language_model)
 
     logger.info("Loading dataset from %s", DATA_PATH)
     data_pipeline = LocalDatasetWrapper(

@@ -12,10 +12,10 @@ import sys
 from pathlib import Path
 
 import yaml
-from unsloth import FastLanguageModel
 
 sys.path.insert(0, str(Path(__file__).parent))
 from dataset import LocalDatasetWrapper
+from runtime_checks import get_fast_language_model
 
 
 CONFIG_PATH = Path("config/qlora_config.yaml")
@@ -37,11 +37,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config))
+    fast_language_model = get_fast_language_model("Dataset validation")
 
     model_name = cfg["model"]["base_model_name"]
     max_seq_length = args.max_seq_length or cfg["model"]["max_seq_length"]
 
-    _, tokenizer = FastLanguageModel.from_pretrained(
+    _, tokenizer = fast_language_model.from_pretrained(
         model_name=model_name,
         max_seq_length=max_seq_length,
         load_in_4bit=True,
