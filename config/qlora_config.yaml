@@ -6,19 +6,19 @@
 
 model:
   # Primary choice: smallest footprint, fits in ~1.8 GB VRAM after 4-bit quant
-  base_model_name: "unsloth/SmolLM2-135M-Instruct"
+  base_model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"
   # Alternative (richer reasoning, ~2.4 GB VRAM):
   # base_model_name: "unsloth/Qwen2.5-0.5B-Instruct"
 
   # Attention memory scales quadratically with this value.
   # 512 is safe for 3 GB. Raise to 1024 only if your data requires it
   # and you confirm no OOM errors first.
-  max_seq_length: 512
+  max_seq_length: 128
 
 lora:
   # Low-rank dimension. 16 is a good default — higher = more capacity but
   # more VRAM. Do not exceed 32 on this hardware.
-  r: 16
+  r: 8
 
   # Scaling factor. Keeping alpha == r is standard practice.
   alpha: 16
@@ -44,7 +44,7 @@ training:
   per_device_train_batch_size: 1
 
   # Simulates effective batch size of 4 without storing 4 samples in VRAM.
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
 
   # Warmup steps before the learning rate scheduler kicks in.
   warmup_steps: 5
