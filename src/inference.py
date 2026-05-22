@@ -1,6 +1,13 @@
 """
 inference.py — Run a single prompt against your trained LoRA adapter.
 
+-This script allows you to run a single prompt against a trained LoRA adapter. 
+-It loads the base model in 4-bit precision, attaches the LoRA adapter, 
+ and generates a response based on the input prompt. The script uses the 
+ same chat template as during training to format the prompt correctly.
+-The script accepts command-line arguments for the prompt, adapter path, 
+ configuration file, maximum new tokens, and temperature.
+
 Usage:
     python src/inference.py --prompt "Explain LoRA in one paragraph."
     python src/inference.py --prompt "What is machine learning?" --max-new-tokens 200
@@ -24,6 +31,17 @@ ADAPTER_PATH  = Path("outputs/final_model")
 
 
 def parse_args() -> argparse.Namespace:
+    """
+    Parse command-line arguments. Defaults are set for adapter path and config file, but the prompt is required.
+    Returns:
+        argparse.Namespace: The parsed arguments. 
+    contains:
+        - prompt (str): The input prompt text to generate a response for.
+        - adapter_path (str): The path to the trained LoRA adapter directory.
+        - config (str): The path to the YAML configuration file.
+        - max_new_tokens (int): The maximum number of new tokens to generate.
+        - temperature (float): The sampling temperature for generation.
+    """
     parser = argparse.ArgumentParser(description="Run inference with a trained LoRA adapter.")
     parser.add_argument("--prompt",         required=True,  help="Input prompt text")
     parser.add_argument("--adapter-path",   default=str(ADAPTER_PATH))

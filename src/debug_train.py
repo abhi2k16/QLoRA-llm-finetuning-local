@@ -1,5 +1,12 @@
 """
-debug_train.py — Step-by-step isolation script for the non-Unsloth stack.
+debug_train.py — Step-by-step isolation script for the non-Unsloth stack. 
+This script isolates each step of the training pipeline to help identify where
+a failure occurs in the non-Unsloth stack (transformers + peft + bitsandbytes).
+This script is useful for debugging issues related to CUDA, model loading, 
+tokenizer loading, dataset processing, and optimizer setup without the complexity 
+of the full training loop or Unsloth integration. Each step is logged with a 
+checkpoint message, and if a step fails, the last successful checkpoint indicates 
+where the issue lies.
 
 Run from project root:
     python src/debug_train.py

@@ -1,3 +1,7 @@
+"""
+runtime_checks.py — Utility functions for runtime checks and error handling.  
+Provides functions to check for CUDA availability and to verify that required Python modules are installed.
+"""
 from __future__ import annotations
 
 import importlib

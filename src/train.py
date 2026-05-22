@@ -1,11 +1,19 @@
 """
-train.py — QLoRA fine-tuning pipeline.
-
+train.py — QLoRA fine-tuning pipeline. 
+Uses:  transformers + peft + bitsandbytes + torch (no Unsloth, no trl)
 Stack: HuggingFace transformers + PEFT + bitsandbytes (no Unsloth).
 
 Run from the project root:
     python src/train.py
+    or
+    python -m src.train
 
+Requirements:
+1. Install the required packages:
+    pip install torch transformers peft bitsandbytes datasets pyyaml
+2. Ensure you have a compatible NVIDIA GPU with CUDA support and the appropriate drivers installed.
+3. Prepare your dataset in the expected format (e.g., a JSON file with conversations).
+4. Configure the training parameters in the config/qlora_config.yaml file, including model name, LoRA settings, and training hyperparameters.
 Ensure the win_llm conda environment is active before running.
 """
 
@@ -69,6 +77,10 @@ def load_tokenizer(model_name: str):
     and particularly when dealing with variable-length sequences in a batch. This ensures that the 
     tokenizer can handle variable-length sequences especially when using causal language models that 
     may not have a dedicated pad token.
+    function inputs are:
+    - model_name: The name or path of the pre-trained model to load (e.g., "gpt2", "EleutherAI/gpt-j-6B").
+    returns:
+    - The loaded tokenizer, with a pad token guaranteed to be set. 
     """
     from transformers import AutoTokenizer
     logger.info("Loading tokenizer: %s", model_name)
@@ -88,7 +100,12 @@ def load_model_4bit(model_name: str):
     performance while reducing memory usage. Additionally, double quantization is enabled for extra 
     memory savings. The model is loaded with device_map="auto" to automatically place layers on the 
     appropriate devices (e.g., GPU), and use_cache is set to False to allow for gradient checkpointing 
-    during training."""
+    during training.
+    function inputs are:
+    - model_name: The name or path of the pre-trained model to load (e.g., "gpt2", "EleutherAI/gpt-j-6B"). 
+    returns:
+    - model: The loaded model in 4-bit precision, ready for fine-tuning with LoRA adapters.
+    """
     from transformers import AutoModelForCausalLM, BitsAndBytesConfig
     logger.info("Loading model in 4-bit: %s", model_name)
     bnb_cfg = BitsAndBytesConfig(
