@@ -172,7 +172,14 @@ def attach_lora(model, lora_cfg: dict):
 
 
 def collate_fn(batch, pad_token_id: int):
-    """Right-pad a batch of token-ID tensors to equal length."""
+    """Right-pad a batch of token-ID tensors to equal length. 
+    This is necessary for efficient batch processing, as models typically 
+    require inputs to be of the same length. The function takes a list of 
+    token-ID tensors (batch) and a pad_token_id to use for padding. It 
+    calculates the maximum sequence length in the batch, creates a new 
+    tensor filled with the pad_token_id, and then copies each sequence 
+    into the appropriate position in the padded tensor. The resulting padded 
+    tensor is returned, which can then be fed into the model for training."""
     max_len = max(x.size(0) for x in batch)
     padded  = torch.full((len(batch), max_len), pad_token_id, dtype=torch.long)
     for i, seq in enumerate(batch):
@@ -210,8 +217,8 @@ class InMemoryTextDataset(torch.utils.data.Dataset):
             )
             self.examples.append(enc["input_ids"].squeeze(0))
 
-    def __len__(self):         return len(self.examples)
-    def __getitem__(self, i):  return self.examples[i]
+    def __len__(self):         return len(self.examples) # 
+    def __getitem__(self, i):  return self.examples[i] # 
 
 
 def run_training(model, tokenizer, texts: list[str], cfg: dict, device: torch.device) -> float:
